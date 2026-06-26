@@ -1,0 +1,16 @@
+# Secrets — NEVER commit these
+.env
+
+# Local runtime state
+translator.db
+*.log
+launchd.out.log
+launchd.err.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

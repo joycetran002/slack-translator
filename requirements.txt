@@ -1,0 +1,10 @@
+slack-bolt>=1.21.0
+slack-sdk>=3.33.0
+python-dotenv>=1.0.0
+
+# Claude engine (TRANSLATION_ENGINE=claude). Omit if you only use Google.
+anthropic>=0.69.0
+
+# Google engine (TRANSLATION_ENGINE=google). Free, no API key.
+deep-translator>=1.11.4
+langdetect>=1.0.9
