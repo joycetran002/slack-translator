@@ -199,6 +199,59 @@ def get_viewer_ids() -> set:
     return ids
 
 
+def _viewers_file_load_lines():
+    try:
+        with open(VIEWERS_FILE) as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _viewers_file_save_lines(lines):
+    with open(VIEWERS_FILE, "w") as f:
+        f.write("\n".join(lines).rstrip("\n") + "\n")
+    _viewers_file_cache["mtime"] = None  # force reload on next message
+
+
+def _line_user_ids(line):
+    """Resolve one non-comment file line to the set of user ids it represents."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return set()
+    return resolve_user_spec(s)
+
+
+def viewers_file_add(ids):
+    lines = _viewers_file_load_lines()
+    have = set()
+    for ln in lines:
+        have |= _line_user_ids(ln)
+    new = [i for i in ids if i not in have]
+    if new:
+        _viewers_file_save_lines(lines + sorted(new))
+    return new
+
+
+def viewers_file_remove(ids):
+    lines = _viewers_file_load_lines()
+    kept, removed = [], set()
+    for ln in lines:
+        line_ids = _line_user_ids(ln)
+        if line_ids & ids:
+            removed |= (line_ids & ids)
+            continue  # drop this entry line
+        kept.append(ln)
+    _viewers_file_save_lines(kept)
+    return removed
+
+
+def viewers_file_clear():
+    # keep comments/blank lines, drop entries
+    kept = [ln for ln in _viewers_file_load_lines()
+            if not ln.strip() or ln.strip().startswith("#")]
+    _viewers_file_save_lines(kept)
+
+
 # --------------------------------------------------------------------------- #
 # Slack call helper (handles rate limiting)
 # --------------------------------------------------------------------------- #
@@ -431,7 +484,11 @@ def _handle_incoming(channel_id, ts, user, text, reading_lang, thread_ts=None, e
         if prof.get("icon"):
             base["icon_url"] = prof["icon"]
 
-    recipients = get_viewer_ids() | set(config.list_viewers(channel_id))
+    # Shared file is the single source of truth when configured; otherwise fall
+    # back to the per-channel DB list.
+    recipients = get_viewer_ids()
+    if not VIEWERS_FILE:
+        recipients |= set(config.list_viewers(channel_id))
     for viewer in recipients:
         slack_call(app.client.chat_postEphemeral, user=viewer, **base)
 
@@ -586,29 +643,43 @@ def cmd_viewers(ack, command, respond):
     action = (parts[0].lower() if parts else "list")
     rest = parts[1] if len(parts) > 1 else ""
 
+    # When a shared viewers file is configured it is the single source of truth
+    # (and changes apply to ALL bots/channels). Otherwise use the per-channel DB.
+    use_file = bool(VIEWERS_FILE)
+
     if action in ("list", ""):
-        viewers = config.list_viewers(channel_id)
+        viewers = sorted(get_viewer_ids()) if use_file else config.list_viewers(channel_id)
+        scope = "everywhere" if use_file else "here"
         if viewers:
-            respond("Privately see translations here: " + ", ".join(f"<@{v}>" for v in viewers) + " (and you).")
+            respond(f"Privately see translations {scope}: " + ", ".join(f"<@{v}>" for v in viewers))
         else:
-            respond("Only *you* see translations here. Add people with `/tr-viewers add @name`.")
+            respond(f"Only *you* see translations {scope}. Add people with `/tr-viewers add @name`.")
     elif action == "add":
         ids = parse_mentioned_user_ids(rest)
         if not ids:
             respond("Couldn't find anyone in that. Try `/tr-viewers add @alice @bob`.")
             return
-        config.add_viewers(channel_id, ids)
+        if use_file:
+            viewers_file_add(ids)
+        else:
+            config.add_viewers(channel_id, ids)
         respond(":white_check_mark: Added: " + ", ".join(f"<@{i}>" for i in ids))
     elif action == "remove":
         ids = parse_mentioned_user_ids(rest)
         if not ids:
             respond("Couldn't find anyone in that. Try `/tr-viewers remove @alice`.")
             return
-        config.remove_viewers(channel_id, ids)
+        if use_file:
+            viewers_file_remove(ids)
+        else:
+            config.remove_viewers(channel_id, ids)
         respond(":white_check_mark: Removed: " + ", ".join(f"<@{i}>" for i in ids))
     elif action == "clear":
-        config.clear_viewers(channel_id)
-        respond(":white_check_mark: Cleared — only you see translations here now.")
+        if use_file:
+            viewers_file_clear()
+        else:
+            config.clear_viewers(channel_id)
+        respond(":white_check_mark: Cleared — only you see translations now.")
     else:
         respond("Usage: `/tr-viewers add @a @b` | `remove @a` | `list` | `clear`")
 
