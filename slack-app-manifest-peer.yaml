@@ -1,0 +1,36 @@
+# Manifest for a SECOND (peer) bot, e.g. Phuong's. No slash commands — those are
+# registered by the primary app and can't be duplicated in the same workspace.
+# This peer reads its languages from .env (DEFAULT_READING_LANG / DEFAULT_TARGET_LANG).
+display_information:
+  name: Translator (Phuong)
+  description: Per-person translator bot
+features:
+  bot_user:
+    display_name: translator-phuong
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - chat:write
+      - chat:write.customize
+      - users:read
+    user:
+      - chat:write
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

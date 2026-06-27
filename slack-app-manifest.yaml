@@ -20,6 +20,10 @@ features:
     - command: /tr-status
       description: Show translation settings for this conversation
       should_escape: false
+    - command: /tr-viewers
+      description: "Choose who privately sees translations: add @a | remove @a | list | clear"
+      usage_hint: "add @teammate"
+      should_escape: true
 oauth_config:
   scopes:
     bot:
@@ -29,7 +33,7 @@ oauth_config:
       - mpim:history
       - chat:write
       - chat:write.customize   # post incoming translations under the sender's name/avatar
-      - users:read             # resolve the sender's display name + avatar
+      - users:read             # resolve display name/avatar + classify guests
       - commands
       - reactions:read
     user:

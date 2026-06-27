@@ -69,6 +69,16 @@ class ConfigStore:
                 )
                 """
             )
+            # Per-channel allow-list of users who privately see translations.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS channel_viewers (
+                    channel_id TEXT NOT NULL,
+                    user_id    TEXT NOT NULL,
+                    PRIMARY KEY (channel_id, user_id)
+                )
+                """
+            )
 
     def get(self, channel_id: str) -> ConvConfig:
         """Return settings for a conversation, falling back to defaults."""
@@ -114,6 +124,35 @@ class ConfigStore:
         current = self.get(channel_id).enabled
         self._upsert(channel_id, enabled=0 if current else 1)
         return not current
+
+    # --- per-channel viewer allow-list ---------------------------------- #
+
+    def add_viewers(self, channel_id: str, user_ids) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO channel_viewers (channel_id, user_id) VALUES (?, ?)",
+                [(channel_id, uid) for uid in user_ids],
+            )
+
+    def remove_viewers(self, channel_id: str, user_ids) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "DELETE FROM channel_viewers WHERE channel_id = ? AND user_id = ?",
+                [(channel_id, uid) for uid in user_ids],
+            )
+
+    def list_viewers(self, channel_id: str) -> list:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT user_id FROM channel_viewers WHERE channel_id = ?", (channel_id,)
+            ).fetchall()
+        return [r["user_id"] for r in rows]
+
+    def clear_viewers(self, channel_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM channel_viewers WHERE channel_id = ?", (channel_id,)
+            )
 
 
 # --------------------------------------------------------------------------- #
