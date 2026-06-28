@@ -91,6 +91,12 @@ INCOMING_EPHEMERAL = os.environ.get("INCOMING_EPHEMERAL", "false").lower() == "t
 #                with a single bot.
 TRANSLATION_MODE = os.environ.get("TRANSLATION_MODE", "replace").lower()
 ANNOTATE = TRANSLATION_MODE == "annotate"
+# FAST_HIDE (replace mode only): delete my original IMMEDIATELY, then translate and
+# re-post — so the original is visible for the shortest time (just the delete call)
+# instead of staying up during translation. Can't reach 0ms (Slack posts it first),
+# but minimizes the window. Trade-off: a same-language message is still briefly
+# removed and re-posted; a translation failure re-posts the original untranslated.
+FAST_HIDE = os.environ.get("FAST_HIDE", "false").lower() == "true"
 # Extra people who should ALSO privately see incoming translations. Comma-separated
 # Slack user IDs (U…/W…) and/or @handles / display names. You are always included.
 TRANSLATION_VIEWERS = os.environ.get("TRANSLATION_VIEWERS", "")
@@ -509,7 +515,35 @@ def _handle_outgoing(channel_id, ts, text, thread_ts=None, is_file=False):
     # Only treat it as a thread reply when thread_ts differs from the message's own
     # ts (a thread *parent* has thread_ts == ts, and we don't want to re-parent it).
     reply_thread = thread_ts if thread_ts and thread_ts != ts else None
+    raw = text.startswith(RAW_PREFIX)
+    body_in = text[len(RAW_PREFIX):].lstrip() if raw else text
+    target = cfg.target_lang or cache.recipient_language(channel_id) or DEFAULT_TARGET_LANG
 
+    # ---- FAST_HIDE: delete the original FIRST, then translate + re-post ---------
+    # Minimizes how long the original is visible (only the delete round-trip, not
+    # the translation time). Not for file messages — deleting would lose the file.
+    if FAST_HIDE and not is_file:
+        bot_msgs.mark(ts)
+        slack_call(user_client.chat_delete, channel=channel_id, ts=ts)  # gone ASAP
+        if raw:
+            final = body_in
+        else:
+            result = translator.translate(body_in, target_lang=target, context=build_context(channel_id))
+            # On failure / same-language, fall back to the original so nothing is lost.
+            final = result.translated_text if (result and result.needs_translation) else body_in
+        cache.add(channel_id, CachedMessage(user=MY_USER_ID, text=body_in, is_me=True))
+        kwargs = {"channel": channel_id, "text": final}
+        if reply_thread:
+            kwargs["thread_ts"] = reply_thread
+        resp = slack_call(user_client.chat_postMessage, **kwargs)
+        new_ts = resp.get("ts") if resp else None
+        if new_ts:
+            bot_msgs.mark(new_ts)
+        if not raw:
+            _broadcast_original(channel_id, body_in, reply_thread or new_ts)
+        return
+
+    # ---- Default: post-then-delete (safer, but original visible during translate)
     def _apply(new_body):
         """Replace my message with new_body; returns the anchor ts for the note."""
         if is_file:
@@ -520,30 +554,25 @@ def _handle_outgoing(channel_id, ts, text, thread_ts=None, is_file=False):
             return ts
         return _replace_my_message(channel_id, ts, new_body, reply_thread)
 
-    # Bypass: `!raw ` sends untranslated (we still strip the prefix).
-    if text.startswith(RAW_PREFIX):
-        raw_body = text[len(RAW_PREFIX):].lstrip()
-        _apply(raw_body)
-        cache.add(channel_id, CachedMessage(user=MY_USER_ID, text=raw_body, is_me=True))
+    if raw:
+        _apply(body_in)
+        cache.add(channel_id, CachedMessage(user=MY_USER_ID, text=body_in, is_me=True))
         return
 
-    target = cfg.target_lang or cache.recipient_language(channel_id) or DEFAULT_TARGET_LANG
-
-    context = build_context(channel_id)
-    result = translator.translate(text, target_lang=target, context=context)
-
-    cache.add(channel_id, CachedMessage(user=MY_USER_ID, text=text, is_me=True))
+    result = translator.translate(body_in, target_lang=target, context=build_context(channel_id))
+    cache.add(channel_id, CachedMessage(user=MY_USER_ID, text=body_in, is_me=True))
 
     if result is None or not result.needs_translation:
         return  # already in the recipients' language, or translation failed
 
     new_ts = _apply(result.translated_text)
+    _broadcast_original(channel_id, body_in, reply_thread or new_ts)
 
-    # Privately show my ORIGINAL text (the viewers' language) to me and to every
-    # viewer, inside the translated message's thread. The public message is the
-    # translation; viewers read the original here. (Open the thread to see it.)
-    note_thread = reply_thread or new_ts
-    base = {"channel": channel_id, "text": f":speech_balloon: {text}"}
+
+def _broadcast_original(channel_id, original_text, note_thread):
+    """Privately show my ORIGINAL text to every viewer, inside the message's thread.
+    The public message is the translation; viewers read the original here."""
+    base = {"channel": channel_id, "text": f":speech_balloon: {original_text}"}
     if note_thread:
         base["thread_ts"] = note_thread
     me_prof = get_profile(MY_USER_ID)
@@ -682,6 +711,42 @@ def cmd_viewers(ack, command, respond):
         respond(":white_check_mark: Cleared — only you see translations now.")
     else:
         respond("Usage: `/tr-viewers add @a @b` | `remove @a` | `list` | `clear`")
+
+
+@app.command("/tr-send")
+def cmd_send(ack, command, respond):
+    """Compose-and-translate: post ONLY the translation as me, so nobody ever sees
+    the original. The text you type in the command is never posted to the channel."""
+    ack()
+    channel_id = command["channel_id"]
+    text = command.get("text", "").strip()
+    if not text:
+        respond("Usage: `/tr-send <your message>` — posts the translation as you; nobody sees the original.")
+        return
+
+    cfg = config.get(channel_id)
+    target = cfg.target_lang or cache.recipient_language(channel_id) or DEFAULT_TARGET_LANG
+    result = translator.translate(text, target_lang=target, context=build_context(channel_id))
+    final = result.translated_text if (result and result.needs_translation) else text
+
+    # Post the translation AS ME (user token). The original never hits the channel.
+    resp = slack_call(user_client.chat_postMessage, channel=channel_id, text=final)
+    if not resp or not resp.get("ts"):
+        respond(":warning: Couldn't post the message. Are you a member of this channel?")
+        return
+    bot_msgs.mark(resp["ts"])  # don't re-process our own post
+
+    # Privately show the original (your language) to the viewer group, in-thread.
+    base = {"channel": channel_id, "text": f":speech_balloon: {text}", "thread_ts": resp["ts"]}
+    me_prof = get_profile(MY_USER_ID)
+    if me_prof and me_prof.get("name"):
+        base["username"] = me_prof["name"]
+        if me_prof.get("icon"):
+            base["icon_url"] = me_prof["icon"]
+    for viewer in get_viewer_ids():
+        slack_call(app.client.chat_postEphemeral, user=viewer, **base)
+
+    respond(":lock: Sent translated — your original was not shown to anyone.")
 
 
 # --------------------------------------------------------------------------- #

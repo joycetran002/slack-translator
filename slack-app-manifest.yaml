@@ -24,6 +24,10 @@ features:
       description: "Choose who privately sees translations: add @a | remove @a | list | clear"
       usage_hint: "add @teammate"
       should_escape: true
+    - command: /tr-send
+      description: Post a translated message (nobody sees your original)
+      usage_hint: "your message in your language"
+      should_escape: false
 oauth_config:
   scopes:
     bot:
