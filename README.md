@@ -138,6 +138,7 @@ in Socket Mode — put any placeholder like `https://example.com/slack`):
 | `/tr-target` | Force the outgoing target language here (`auto` to clear) |
 | `/tr-toggle` | Enable/disable translation in this conversation |
 | `/tr-status` | Show current settings |
+| `/tr-send` | Post a translated message (nobody sees your original) for channel-level messages |
 
 ### 6. Install & grab tokens
 
